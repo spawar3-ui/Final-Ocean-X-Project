@@ -1,0 +1,13 @@
+{
+    "ffiTag": "livekit-ffi/v0.12.69",
+    "installed": [
+        {
+            "folder": "ffi-macos-arm64",
+            "sha256": "69dc68bdc99a11dbb014923b1e4f408e9186fdc10f09554dd0ce079bd8be78db"
+        },
+        {
+            "folder": "ffi-macos-x86_64",
+            "sha256": "a39e03e69532846aa9b7198a9bd6bc270b09e25120b8c7267fd0f20817439c64"
+        }
+    ]
+}
