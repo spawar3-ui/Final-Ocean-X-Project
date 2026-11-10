@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Rendering.HighDefinition;
 
 // Put this on the First Person Controller (same object that has an AudioSource).
 // Walking into bacteria: point light + bacteria glow step up
@@ -51,6 +52,7 @@ public class OceanLightController : MonoBehaviour
     private bool fadingOut;
     private OceanPickup[] allPickups;
     private Material orbMaterial;
+    private HDAdditionalLightData hdLight; // HDRP: the real intensity driver when Unit is Lumen/Candela/Lux/EV100
 
     void Start()
     {
@@ -63,8 +65,9 @@ public class OceanLightController : MonoBehaviour
         tickSource.playOnAwake = false;
         tickSource.spatialBlend = 0f;
         if (pointLight == null) pointLight = FindAnyObjectByType<Light>();
+        hdLight = pointLight.GetComponent<HDAdditionalLightData>();
         pointLight.color = lightColor;
-        pointLight.intensity = 0f;
+        SetLightIntensity(0f);
         if (lightOrb != null) orbMaterial = lightOrb.material;
         ApplyOrb();
 
@@ -93,9 +96,18 @@ public class OceanLightController : MonoBehaviour
 
         float speed = fadingOut ? fadeOutSpeed : easeSpeed;
         currentIntensity = Mathf.MoveTowards(currentIntensity, targetIntensity, speed * Time.deltaTime);
-        pointLight.intensity = currentIntensity;
+        SetLightIntensity(currentIntensity);
         ApplyOrb();
         ApplyGlow();
+    }
+
+    // Sets both the legacy Light.intensity (Built-in/URP) and HDAdditionalLightData.intensity
+    // (HDRP, when the light's Unit is Lumen/Candela/Lux/EV100) so this works under HDRP too --
+    // HDRP ignores plain Light.intensity once a Unit other than the legacy one is selected.
+    private void SetLightIntensity(float value)
+    {
+        pointLight.intensity = value;
+        if (hdLight != null) hdLight.intensity = value;
     }
 
     // The orb fades in and grows with the light, so the player can see it.
@@ -136,6 +148,18 @@ public class OceanLightController : MonoBehaviour
     public void AbsorbBacteria(float share)
     {
         targetIntensity = Mathf.Min(targetIntensity + bacteriaStep * share, maxIntensity);
+    }
+
+    // Called externally (e.g. by the ESP32 hardware controller) every frame to drive
+    // brightness directly, bypassing the normal bacteria/coral-driven easing.
+    // Keeps the light, the orb at the top of the screen, and pickup glow all in sync.
+    public void SetHardwareBrightness01(float t)
+    {
+        if (pointLight == null) return;
+        currentIntensity = targetIntensity = Mathf.Clamp01(t) * maxIntensity;
+        SetLightIntensity(currentIntensity);
+        ApplyOrb();
+        ApplyGlow();
     }
 
     // A soft, quick tick while soaking up specks (rate-limited so it never machine-guns).

@@ -3,79 +3,51 @@ using System.Collections.Concurrent;
 using System.IO.Ports;
 using System.Threading;
 using UnityEngine;
-using UnityEngine.Events;
 
 /// <summary>
-/// Reads the Arduino Uno game controller over serial (9600 baud, one text line per message):
-///   MOVE LEFT | MOVE RIGHT | MOVE UP | MOVE DOWN | MOVE NONE   joystick direction
-///   FORWARD 1 | FORWARD 0                                       button pressed / released
-///   EAT                                                         joystick pressed (once per click)
-///   LIGHT BRIGHT | LIGHT DIM                                    LED level (encoder)
-/// Put this on ONE GameObject in the scene (e.g. an empty called "Arduino").
+/// Reads Victoria's ESP32-S3 controller over serial (115200 baud, one text line per message):
+///   B:0-255                           potentiometer -> light brightness
+///   J1:UP/DOWN/LEFT/RIGHT/CENTER      facing stick: up/down = rise/dive, left/right = turn
+///   J2:UP/DOWN/LEFT/RIGHT/CENTER      movement stick: up = forward, left/right = strafe
+///   EAT                                joystick 2 click
+/// Replies "EATEN" immediately on every click so the hardware's plain LED blinks.
+///
+/// Put this on ONE GameObject in the scene (e.g. an empty called "ESP32", or the Player).
 /// Reading happens on a background thread so the game never freezes.
 /// Requires: Edit > Project Settings > Player > Api Compatibility Level = .NET Framework.
+///
+/// Kept the class name ArduinoSerial (even though this is the ESP32, not the old Uno) so
+/// PlayerEat.cs doesn't need any changes -- it already reads ClickedThisFrame from this class.
 /// </summary>
 [DefaultExecutionOrder(-100)]
 public class ArduinoSerial : MonoBehaviour
 {
-    public enum StickDir { None, Left, Right, Up, Down }
-
     [Header("Connection")]
-    [Tooltip("Mac: run  ls /dev/cu.*  in Terminal (Uno looks like /dev/cu.usbmodem1101). Windows: Device Manager > Ports, e.g. COM3.")]
-    public string portName = "/dev/cu.usbmodem1101";
-    public int baudRate = 9600;
-    [Tooltip("If the port above isn't found, try the first Arduino-looking port (usbmodem / ttyACM / COM).")]
-    public bool autoDetect = true;
-
-    [Header("Joystick")]
-    [Tooltip("Tick if pushing the stick up moves you down.")]
-    public bool invertUpDown = false;
-    [Tooltip("Tick if pushing the stick right turns you left.")]
-    public bool invertLeftRight = false;
-
-    [Header("Events")]
-    [Tooltip("Fires once each time the joystick is pressed.")]
-    public UnityEvent onEat;
+    [Tooltip("Check Arduino IDE (bottom status bar, or Tools > Port) for the exact name.")]
+    public string portName = "/dev/cu.usbserial-0001";
+    public int baudRate = 115200;
 
     [Header("Debug")]
-    [Tooltip("Logs every line from the Arduino.")]
+    [Tooltip("Logs every line from the ESP32.")]
     public bool logRawLines = false;
 
     [Header("Live values (read-only, watch these in Play mode)")]
     [SerializeField] bool connected;
-    [SerializeField] StickDir direction = StickDir.None;
-    [SerializeField] bool forwardHeld;
-    [SerializeField] bool lightDim;
+    [SerializeField] Vector2 joystick1;
+    [SerializeField] Vector2 joystick2;
+    [SerializeField] float brightness01;
     [SerializeField] string lastLine = "";
 
     /// <summary>True while the serial port is open.</summary>
     public bool IsConnected => connected;
-    /// <summary>Raw joystick direction.</summary>
-    public StickDir Direction => direction;
-    /// <summary>x = left(-1)/right(+1), y = down(-1)/up(+1). Both 0 when centred.</summary>
-    public Vector2 Joystick { get; private set; }
-    /// <summary>-1 down, 0 centred, +1 up.</summary>
-    public float Vertical => Joystick.y;
-    /// <summary>-1 left, 0 centred, +1 right.</summary>
-    public float Horizontal => Joystick.x;
-    /// <summary>True while the forward button is held.</summary>
-    public bool ForwardHeld => forwardHeld;
-    /// <summary>True for exactly one frame after the joystick is pressed.</summary>
-    public bool EatPressedThisFrame => eatFrame == Time.frameCount;
-    /// <summary>True when the encoder has set the LED to dim.</summary>
-    public bool LightDim => lightDim;
-
-    // ---- Names used by the older ESP32 scripts (FirstPersonController, PlayerEat, ...), kept so they still compile ----
-    /// <summary>Always true now: the joystick's up/down always moves the player up/down (forward is the button).</summary>
-    public bool UpDownMode => true;
-    /// <summary>Same as EatPressedThisFrame (joystick press).</summary>
-    public bool ClickedThisFrame => EatPressedThisFrame;
-    /// <summary>1 = bright, 0 = dim (the Uno has no potentiometer, only the two-level knob).</summary>
-    public float Knob => lightDim ? 0f : 1f;
-    /// <summary>White LED, dimmed when the knob is turned.</summary>
-    public Color LedColor => lightDim ? new Color(0.08f, 0.08f, 0.08f) : Color.white;
-    /// <summary>The Uno has no boat alarm.</summary>
-    public bool AlarmOn => false;
+    /// <summary>Facing stick: x = turn left(-1)/right(+1), y = dive(-1)/rise(+1). Zero when centered.</summary>
+    public Vector2 Joystick1 => joystick1;
+    /// <summary>Movement stick: x = strafe left(-1)/right(+1), y = forward(+1)/back(unused). Zero when centered.</summary>
+    public Vector2 Joystick2 => joystick2;
+    /// <summary>Potentiometer, 0-1.</summary>
+    public float Brightness01 => brightness01;
+    /// <summary>True for exactly one frame after joystick 2 is clicked.</summary>
+    public bool ClickedThisFrame => eatFrame == Time.frameCount;
 
     SerialPort port;
     Thread readThread;
@@ -85,30 +57,21 @@ public class ArduinoSerial : MonoBehaviour
 
     void OnEnable()
     {
-        string name = ResolvePortName();
-
-        // Windows needs this prefix for COM10 and above.
-        if (name.StartsWith("COM", StringComparison.OrdinalIgnoreCase) &&
-            int.TryParse(name.Substring(3), out int n) && n > 9)
-            name = @"\\.\" + name;
-
         try
         {
-            port = new SerialPort(name, baudRate)
+            port = new SerialPort(portName, baudRate)
             {
                 NewLine = "\n",
-                ReadTimeout = 100, // lets the thread notice when it should stop
+                ReadTimeout = 100,
                 WriteTimeout = 100,
-                // The Uno restarts when the port opens - that's fine, it re-sends READY and its light state.
-                DtrEnable = true
             };
             port.Open();
         }
         catch (Exception e)
         {
-            Debug.LogError($"[ArduinoSerial] Could not open {name}: {e.Message}\n" +
-                           "Check the port name (ls /dev/cu.* in Terminal), close the Arduino Serial Monitor " +
-                           "and the Arduino IDE's upload, and make sure Api Compatibility Level is .NET Framework.");
+            Debug.LogError($"[ArduinoSerial] Could not open {portName}: {e.Message}\n" +
+                           "Check the port name (Arduino IDE > Tools > Port), close the Arduino Serial Monitor, " +
+                           "and make sure Api Compatibility Level is .NET Framework.");
             port = null;
             return;
         }
@@ -117,25 +80,7 @@ public class ArduinoSerial : MonoBehaviour
         readThread = new Thread(ReadLoop) { IsBackground = true };
         readThread.Start();
         connected = true;
-        Debug.Log($"[ArduinoSerial] Opened {name} at {baudRate}");
-    }
-
-    string ResolvePortName()
-    {
-        if (!autoDetect) return portName;
-        try
-        {
-            string[] names = SerialPort.GetPortNames();
-            foreach (string n in names) if (n == portName) return portName;
-            foreach (string n in names)
-                if (n.Contains("usbmodem") || n.Contains("ttyACM") || n.StartsWith("COM", StringComparison.OrdinalIgnoreCase))
-                {
-                    Debug.Log($"[ArduinoSerial] {portName} not found, using {n} instead.");
-                    return n;
-                }
-        }
-        catch (Exception e) { Debug.LogWarning($"[ArduinoSerial] Port search failed: {e.Message}"); }
-        return portName;
+        Debug.Log($"[ArduinoSerial] Opened {portName} at {baudRate} (ESP32 protocol)");
     }
 
     void ReadLoop()
@@ -144,7 +89,8 @@ public class ArduinoSerial : MonoBehaviour
         {
             try
             {
-                lines.Enqueue(port.ReadLine().Trim());
+                string line = port.ReadLine().Trim();
+                if (line.Length > 0) lines.Enqueue(line);
             }
             catch (TimeoutException) { }
             catch (Exception e)
@@ -157,11 +103,9 @@ public class ArduinoSerial : MonoBehaviour
 
     void Update()
     {
-        // Handle every line in order (unlike a stream of positions, a missed EAT would be a missed click).
         while (lines.TryDequeue(out string line))
         {
-            if (line.Length == 0) continue;
-            if (logRawLines) Debug.Log($"[Arduino] {line}");
+            if (logRawLines) Debug.Log($"[ESP32] {line}");
             lastLine = line;
             Handle(line);
         }
@@ -169,53 +113,46 @@ public class ArduinoSerial : MonoBehaviour
         if (connected && (port == null || !port.IsOpen))
         {
             connected = false;
-            Joystick = Vector2.zero;
-            direction = StickDir.None;
-            forwardHeld = false;
+            joystick1 = Vector2.zero;
+            joystick2 = Vector2.zero;
         }
     }
 
     void Handle(string line)
     {
-        string[] p = line.ToUpperInvariant().Split(' ');
-
-        switch (p[0])
+        if (line.StartsWith("B:"))
         {
-            case "MOVE":
-                if (p.Length < 2) return;
-                switch (p[1])
-                {
-                    case "LEFT":  direction = StickDir.Left;  break;
-                    case "RIGHT": direction = StickDir.Right; break;
-                    case "UP":    direction = StickDir.Up;    break;
-                    case "DOWN":  direction = StickDir.Down;  break;
-                    default:      direction = StickDir.None;  break;
-                }
-                float x = direction == StickDir.Right ? 1f : direction == StickDir.Left ? -1f : 0f;
-                float y = direction == StickDir.Up ? 1f : direction == StickDir.Down ? -1f : 0f;
-                Joystick = new Vector2(invertLeftRight ? -x : x, invertUpDown ? -y : y);
-                break;
-
-            case "FORWARD":
-                forwardHeld = p.Length > 1 && p[1] == "1";
-                break;
-
-            case "EAT":
-                eatFrame = Time.frameCount;
-                onEat?.Invoke();
-                break;
-
-            case "LIGHT":
-                lightDim = p.Length > 1 && p[1] == "DIM";
-                break;
-
-            case "READY":
-                Debug.Log("[ArduinoSerial] Controller is ready.");
-                break;
+            if (int.TryParse(line.Substring(2), out int val))
+                brightness01 = Mathf.Clamp01(val / 255f);
+        }
+        else if (line.StartsWith("J1:"))
+        {
+            joystick1 = DirectionToVector(line.Substring(3));
+        }
+        else if (line.StartsWith("J2:"))
+        {
+            joystick2 = DirectionToVector(line.Substring(3));
+        }
+        else if (line == "EAT")
+        {
+            eatFrame = Time.frameCount;
+            Send("EATEN"); // confirms the click so the hardware's plain LED blinks
         }
     }
 
-    /// <summary>Sends one text line to the Arduino (the current sketch doesn't listen for any, but it's here if you add some).</summary>
+    static Vector2 DirectionToVector(string dir)
+    {
+        switch (dir)
+        {
+            case "UP": return new Vector2(0f, 1f);
+            case "DOWN": return new Vector2(0f, -1f);
+            case "LEFT": return new Vector2(-1f, 0f);
+            case "RIGHT": return new Vector2(1f, 0f);
+            default: return Vector2.zero; // CENTER
+        }
+    }
+
+    /// <summary>Sends one text line to the ESP32.</summary>
     public void Send(string command)
     {
         if (port == null || !port.IsOpen) return;
@@ -237,8 +174,7 @@ public class ArduinoSerial : MonoBehaviour
             port = null;
         }
         connected = false;
-        Joystick = Vector2.zero;
-        direction = StickDir.None;
-        forwardHeld = false;
+        joystick1 = Vector2.zero;
+        joystick2 = Vector2.zero;
     }
 }
