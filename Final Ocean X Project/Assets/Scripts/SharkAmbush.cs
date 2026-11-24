@@ -19,6 +19,7 @@ public class SharkAmbush : MonoBehaviour
     public Color warningColor = Color.red;
     public string playerTag = "Player";
     public Collider despawnZone;            // optional - when the player enters this zone, the shark is destroyed
+    public BloodScreenFlash bloodScreen;    // optional - blood splatter UI shown when the shark bites
 
     [Header("Spawn")]
     public float spawnDistanceBehind = 25f;
@@ -229,6 +230,7 @@ public class SharkAmbush : MonoBehaviour
     {
         state = State.Done;
         Shake(hitShakeDuration, hitShakeMagnitude, fovPunch);
+        if (bloodScreen != null) bloodScreen.Show();
         StartCoroutine(RestartRoutine());
     }
 
