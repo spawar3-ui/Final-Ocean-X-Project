@@ -1,5 +1,4 @@
 using UnityEngine;
-using UnityEngine.Rendering.HighDefinition;
 
 // Put this on the First Person Controller (same object that has an AudioSource).
 // Walking into bacteria: point light + bacteria glow step up
@@ -52,7 +51,6 @@ public class OceanLightController : MonoBehaviour
     private bool fadingOut;
     private OceanPickup[] allPickups;
     private Material orbMaterial;
-    private HDAdditionalLightData hdLight; // HDRP: the real intensity driver when Unit is Lumen/Candela/Lux/EV100
 
     void Start()
     {
@@ -65,7 +63,6 @@ public class OceanLightController : MonoBehaviour
         tickSource.playOnAwake = false;
         tickSource.spatialBlend = 0f;
         if (pointLight == null) pointLight = FindAnyObjectByType<Light>();
-        hdLight = pointLight.GetComponent<HDAdditionalLightData>();
         pointLight.color = lightColor;
         SetLightIntensity(0f);
         if (lightOrb != null) orbMaterial = lightOrb.material;
@@ -101,13 +98,14 @@ public class OceanLightController : MonoBehaviour
         ApplyGlow();
     }
 
-    // Sets both the legacy Light.intensity (Built-in/URP) and HDAdditionalLightData.intensity
-    // (HDRP, when the light's Unit is Lumen/Candela/Lux/EV100) so this works under HDRP too --
-    // HDRP ignores plain Light.intensity once a Unit other than the legacy one is selected.
+    // Sets intensity directly on the standard Light component. Unity 6's HDRP moved light
+    // units onto Light itself (Light.intensity / Light.lightUnit) -- HDAdditionalLightData's
+    // versions of these are now deprecated/legacy pass-throughs and don't reliably propagate,
+    // which was the actual cause of brightness getting stuck/compressed into a narrow range.
     private void SetLightIntensity(float value)
     {
+        pointLight.lightUnit = UnityEngine.Rendering.LightUnit.Ev100;
         pointLight.intensity = value;
-        if (hdLight != null) hdLight.intensity = value;
     }
 
     // The orb fades in and grows with the light, so the player can see it.
